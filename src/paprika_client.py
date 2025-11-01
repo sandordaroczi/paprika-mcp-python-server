@@ -2,9 +2,11 @@ import gzip
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import aiohttp
 
@@ -157,6 +159,107 @@ class PaprikaClient:
         json_str = json.dumps(data, sort_keys=True)
         return hashlib.sha256(json_str.encode()).hexdigest()
 
+    def _parse_quantity(self, quantity_str: str) -> Tuple[float, Optional[str]]:
+        """
+        Parse a quantity string into numeric value and unit.
+
+        Examples:
+            "4 kilos" -> (4.0, "kilos")
+            "3 liters" -> (3.0, "liters")
+            "5" -> (5.0, None)
+            "-2 kilos" -> (-2.0, "kilos")
+
+        Args:
+            quantity_str: Quantity string to parse
+
+        Returns:
+            Tuple of (numeric_value, unit_string)
+        """
+        if not quantity_str or not isinstance(quantity_str, str):
+            return (0.0, None)
+
+        quantity_str = quantity_str.strip()
+        if not quantity_str:
+            return (0.0, None)
+
+        # Match pattern: optional minus sign, digits (including decimals), optional whitespace, optional unit
+        match = re.match(r"^(-?\d+\.?\d*)\s*(.*)$", quantity_str)
+        if match:
+            numeric_value = float(match.group(1))
+            unit = match.group(2).strip() if match.group(2) else None
+            return (numeric_value, unit if unit else None)
+
+        # Try to extract just a number
+        try:
+            numeric_value = float(quantity_str)
+            return (numeric_value, None)
+        except ValueError:
+            return (0.0, None)
+
+    def _add_quantities(self, quantity1: str, quantity2: str) -> Tuple[str, bool]:
+        """
+        Add two quantity strings, preserving units.
+
+        Examples:
+            "4 kilos" + "1 kilo" -> ("5 kilos", True)
+            "3 liters" + "2 liters" -> ("5 liters", True)
+            "4 kilos" + "2" -> ("6 kilos", True)  # Unit from first quantity
+            "4" + "2 kilos" -> ("6 kilos", True)  # Unit from second quantity
+            "4 kilos" + "-2 kilos" -> ("2 kilos", True)
+            "1 kilo" + "-2 kilos" -> Error: would go below zero
+
+        Args:
+            quantity1: First quantity string (existing quantity)
+            quantity2: Second quantity string (quantity to add)
+
+        Returns:
+            Tuple of (result_quantity_string, success)
+
+        Raises:
+            PaprikaAPIError: If result would be negative
+        """
+        if not isinstance(quantity1, str):
+            quantity1 = str(quantity1)
+        if not isinstance(quantity2, str):
+            quantity2 = str(quantity2)
+
+        value1, unit1 = self._parse_quantity(quantity1)
+        value2, unit2 = self._parse_quantity(quantity2)
+
+        # Determine which unit to use (prefer unit1, fallback to unit2)
+        result_unit = unit1 if unit1 else unit2
+
+        # Add the numeric values
+        result_value = value1 + value2
+
+        # Check if result would be negative
+        if result_value < 0:
+            raise PaprikaAPIError(
+                f"Cannot subtract {quantity2} from {quantity1}: result would be negative"
+            )
+
+        # Format the result
+        if result_unit:
+            # Remove 's' from unit if value is 1 (singular form)
+            if result_value == 1.0 and result_unit.endswith("s"):
+                display_unit = result_unit[:-1]
+            else:
+                display_unit = result_unit
+
+            # Format with appropriate precision (no decimals if whole number)
+            if result_value == int(result_value):
+                result_str = f"{int(result_value)} {display_unit}"
+            else:
+                result_str = f"{result_value} {display_unit}"
+        else:
+            # No unit, format as integer if whole number
+            if result_value == int(result_value):
+                result_str = str(int(result_value))
+            else:
+                result_str = str(result_value)
+
+        return (result_str, True)
+
     def _gzip_json(self, data: Dict[str, Any]) -> bytes:
         """
         Compress JSON data with gzip.
@@ -284,7 +387,12 @@ class PaprikaClient:
 
         # Create multipart form data
         data = aiohttp.FormData()
-        data.add_field("data", gzipped_data, content_type="application/octet-stream")
+        data.add_field(
+            "data",
+            BytesIO(gzipped_data),
+            filename="recipe.json.gz",
+            content_type="application/octet-stream",
+        )
 
         try:
             await self._make_authenticated_request(
@@ -350,7 +458,12 @@ class PaprikaClient:
 
         # Create multipart form data
         data = aiohttp.FormData()
-        data.add_field("data", gzipped_data, content_type="application/octet-stream")
+        data.add_field(
+            "data",
+            BytesIO(gzipped_data),
+            filename="recipe.json.gz",
+            content_type="application/octet-stream",
+        )
 
         try:
             await self._make_authenticated_request(
@@ -404,7 +517,10 @@ class PaprikaClient:
             # Create multipart form data
             data = aiohttp.FormData()
             data.add_field(
-                "data", gzipped_data, content_type="application/octet-stream"
+                "data",
+                BytesIO(gzipped_data),
+                filename="recipe.json.gz",
+                content_type="application/octet-stream",
             )
 
             await self._make_authenticated_request(
@@ -472,6 +588,379 @@ class PaprikaClient:
         except Exception as e:
             logger.error(f"Failed to list recipes: {str(e)}")
             raise PaprikaAPIError(f"Failed to list recipes: {str(e)}")
+
+    async def get_grocery_lists(self) -> List[Dict[str, Any]]:
+        """
+        Get all grocery lists with their names and default status.
+
+        Returns:
+            List of dictionaries with 'name' and 'is_default' keys
+
+        Raises:
+            PaprikaAPIError: If fetching fails
+        """
+        try:
+            response = await self._make_authenticated_request(
+                "GET", "/sync/grocerylists"
+            )
+            grocery_lists = response.get("result", [])
+
+            if not grocery_lists:
+                return []
+
+            result = []
+            for grocery_list in grocery_lists:
+                if "name" in grocery_list:
+                    result.append(
+                        {
+                            "name": grocery_list["name"],
+                            "is_default": grocery_list.get("is_default", False),
+                        }
+                    )
+
+            logger.info(f"Found {len(result)} grocery lists")
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to get grocery lists: {str(e)}")
+            raise PaprikaAPIError(f"Failed to get grocery lists: {str(e)}")
+
+    async def get_default_list_uuid(self) -> Optional[str]:
+        """
+        Get the default grocery list UID.
+
+        Returns:
+            Default grocery list UID, or None if not found
+
+        Raises:
+            PaprikaAPIError: If fetching fails
+        """
+        try:
+            response = await self._make_authenticated_request(
+                "GET", "/sync/grocerylists"
+            )
+            grocery_lists = response.get("result", [])
+
+            if not grocery_lists:
+                raise PaprikaAPIError("No grocery lists found")
+
+            for grocery_list in grocery_lists:
+                if grocery_list.get("is_default"):
+                    uid = grocery_list.get("uid")
+                    logger.info(
+                        f"Found default grocery list: {grocery_list.get('name')} (UID: {uid})"
+                    )
+                    return uid
+
+            raise PaprikaAPIError("No default grocery list found")
+
+        except Exception as e:
+            logger.error(f"Failed to get default grocery list UUID: {str(e)}")
+            raise PaprikaAPIError(f"Failed to get default grocery list: {str(e)}")
+
+    async def _get_list_uuid_by_name(
+        self, grocery_list_name: Optional[str] = None
+    ) -> str:
+        """
+        Get grocery list UID by name, or default if name is None.
+
+        Args:
+            grocery_list_name: Name of the grocery list, or None for default
+
+        Returns:
+            Grocery list UID
+
+        Raises:
+            PaprikaAPIError: If list not found, with message including valid list names
+        """
+        if grocery_list_name is None:
+            return await self.get_default_list_uuid()
+
+        try:
+            response = await self._make_authenticated_request(
+                "GET", "/sync/grocerylists"
+            )
+            grocery_lists = response.get("result", [])
+
+            for grocery_list in grocery_lists:
+                if grocery_list.get("name") == grocery_list_name:
+                    return grocery_list.get("uid")
+
+            # List not found - get valid list names for error message
+            valid_names = []
+            for grocery_list in grocery_lists:
+                if "name" in grocery_list:
+                    valid_names.append(grocery_list["name"])
+
+            if valid_names:
+                valid_names_str = ", ".join([f"'{name}'" for name in valid_names])
+                raise PaprikaAPIError(
+                    f"Grocery list '{grocery_list_name}' not found. Valid grocery lists are: {valid_names_str}"
+                )
+            else:
+                raise PaprikaAPIError(
+                    f"Grocery list '{grocery_list_name}' not found. No grocery lists are available."
+                )
+
+        except Exception as e:
+            if isinstance(e, PaprikaAPIError):
+                raise
+            logger.error(f"Failed to get grocery list UUID: {str(e)}")
+            raise PaprikaAPIError(f"Failed to get grocery list UUID: {str(e)}")
+
+    async def get_groceries(
+        self, grocery_list_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all groceries from a grocery list.
+
+        Args:
+            grocery_list_name: Name of the grocery list, or None for default
+
+        Returns:
+            List of grocery items with name and quantity
+
+        Raises:
+            PaprikaAPIError: If fetching fails
+        """
+        try:
+            list_uuid = await self._get_list_uuid_by_name(grocery_list_name)
+            response = await self._make_authenticated_request("GET", "/sync/groceries")
+            groceries = response.get("result", [])
+
+            # Filter groceries by list_uid
+            filtered_groceries = []
+            for grocery in groceries:
+                if grocery.get("list_uid") == list_uuid:
+                    filtered_groceries.append(
+                        {
+                            "name": grocery.get("name", ""),
+                            "quantity": grocery.get("quantity", ""),
+                        }
+                    )
+
+            logger.info(f"Found {len(filtered_groceries)} groceries in list")
+            return filtered_groceries
+
+        except Exception as e:
+            logger.error(f"Failed to get groceries: {str(e)}")
+            raise PaprikaAPIError(f"Failed to get groceries: {str(e)}")
+
+    async def get_grocery(
+        self, item_name: str, grocery_list_name: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get a specific grocery item by name.
+
+        Args:
+            item_name: Name of the grocery item
+            grocery_list_name: Name of the grocery list, or None for default
+
+        Returns:
+            Grocery item with name and quantity (for MCP tool), or full grocery object if found internally
+
+        Raises:
+            PaprikaAPIError: If fetching fails
+        """
+        try:
+            list_uuid = await self._get_list_uuid_by_name(grocery_list_name)
+            response = await self._make_authenticated_request("GET", "/sync/groceries")
+            groceries = response.get("result", [])
+
+            for grocery in groceries:
+                grocery_name = grocery.get("name", "").strip()
+                if (
+                    grocery_name == item_name.strip()
+                    and grocery.get("list_uid") == list_uuid
+                ):
+                    # Return full grocery object (needed for add_grocery to get uid)
+                    return grocery
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Failed to get grocery item '{item_name}': {str(e)}")
+            raise PaprikaAPIError(f"Failed to get grocery item: {str(e)}")
+
+    async def add_grocery(
+        self,
+        item_name: str,
+        quantity: Union[int, str] = 1,
+        grocery_list_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Add or update a grocery item on the grocery list.
+
+        Args:
+            item_name: Name of the grocery item
+            quantity: Quantity to add (default: 1). Can be an integer or string like "1 kilo", "4 liters", "-2 kilos"
+            grocery_list_name: Name of the grocery list, or None for default
+
+        Returns:
+            Updated grocery item with final quantity
+
+        Raises:
+            PaprikaAPIError: If adding fails or result would be negative
+        """
+        if not item_name or not item_name.strip():
+            raise PaprikaAPIError("Item name cannot be empty")
+
+        try:
+            # Convert quantity to string if it's an integer
+            if isinstance(quantity, int):
+                quantity_str = str(quantity)
+            else:
+                quantity_str = str(quantity)
+
+            # Check if grocery already exists by fetching full grocery data
+            list_uuid = await self._get_list_uuid_by_name(grocery_list_name)
+            response = await self._make_authenticated_request("GET", "/sync/groceries")
+            groceries = response.get("result", [])
+
+            existing_grocery = None
+            for grocery in groceries:
+                grocery_name = grocery.get("name", "").strip()
+                if (
+                    grocery_name == item_name.strip()
+                    and grocery.get("list_uid") == list_uuid
+                ):
+                    existing_grocery = grocery
+                    break
+
+            if existing_grocery:
+                grocery_uid = existing_grocery.get("uid")
+                current_quantity_str = str(existing_grocery.get("quantity", "0"))
+            else:
+                grocery_uid = self._generate_uuid()
+                current_quantity_str = "0"
+
+            # Add quantities using the helper method (handles units and negative values)
+            try:
+                final_quantity_str, _ = self._add_quantities(
+                    current_quantity_str, quantity_str
+                )
+            except PaprikaAPIError:
+                # Re-raise PaprikaAPIError as-is (these are already user-friendly)
+                raise
+
+            # Create grocery item data
+            grocery_data = [
+                {
+                    "uid": grocery_uid,
+                    "name": item_name.strip(),
+                    "ingredient": item_name.strip(),
+                    "quantity": final_quantity_str,
+                    "recipe_uid": None,
+                    "order_flag": 316,
+                    "purchased": False,
+                    "aisle": "Produce",
+                    "recipe": None,
+                    "instruction": "",
+                    "separate": False,
+                    "aisle_uid": "F94467760BF4BC6B9521FFA9329D0F1DBCCA0F5AC0808BD8552FB375A565FB9E",
+                    "list_uid": list_uuid,
+                }
+            ]
+
+            # Compress and send
+            gzipped_data = self._gzip_json(grocery_data)
+            data = aiohttp.FormData()
+            data.add_field(
+                "data",
+                BytesIO(gzipped_data),
+                filename="grocery.json.gz",
+                content_type="application/octet-stream",
+            )
+
+            await self._make_authenticated_request("POST", "/sync/groceries", data=data)
+
+            logger.info(
+                f"Successfully added {quantity_str} '{item_name}' (total: {final_quantity_str})"
+            )
+            return {
+                "name": item_name.strip(),
+                "quantity": final_quantity_str,
+            }
+
+        except PaprikaAPIError:
+            # Re-raise PaprikaAPIError as-is
+            raise
+        except Exception as e:
+            logger.error(f"Failed to add grocery '{item_name}': {str(e)}")
+            raise PaprikaAPIError(f"Failed to add grocery: {str(e)}")
+
+    async def clear_grocery_list(self, grocery_list_name: Optional[str] = None) -> bool:
+        """
+        Clear all items from a grocery list.
+
+        Args:
+            grocery_list_name: Name of the grocery list, or None for default
+
+        Returns:
+            True if successful
+
+        Raises:
+            PaprikaAPIError: If clearing fails
+        """
+        try:
+            list_uuid = await self._get_list_uuid_by_name(grocery_list_name)
+            response = await self._make_authenticated_request("GET", "/sync/groceries")
+            groceries = response.get("result", [])
+
+            # Get all groceries for this list
+            groceries_to_delete = []
+            for grocery in groceries:
+                if grocery.get("list_uid") == list_uuid:
+                    groceries_to_delete.append(grocery)
+
+            if not groceries_to_delete:
+                logger.info("Grocery list is already empty")
+                return True
+
+            # Delete all groceries by setting quantity to 0 or removing them
+            # Based on the API, we'll set quantity to 0 for each item
+            grocery_data_list = []
+            for grocery in groceries_to_delete:
+                grocery_item = {
+                    "uid": grocery.get("uid"),
+                    "name": grocery.get("name", ""),
+                    "ingredient": grocery.get("ingredient", ""),
+                    "quantity": "0",
+                    "recipe_uid": grocery.get("recipe_uid"),
+                    "order_flag": grocery.get("order_flag", 316),
+                    "purchased": False,
+                    "aisle": grocery.get("aisle", "Produce"),
+                    "recipe": grocery.get("recipe"),
+                    "instruction": grocery.get("instruction", ""),
+                    "separate": grocery.get("separate", False),
+                    "aisle_uid": grocery.get(
+                        "aisle_uid",
+                        "F94467760BF4BC6B9521FFA9329D0F1DBCCA0F5AC0808BD8552FB375A565FB9E",
+                    ),
+                    "list_uid": list_uuid,
+                }
+                grocery_data_list.append(grocery_item)
+
+            # Compress and send
+            gzipped_data = self._gzip_json(grocery_data_list)
+            data = aiohttp.FormData()
+            data.add_field(
+                "data",
+                BytesIO(gzipped_data),
+                filename="grocery.json.gz",
+                content_type="application/octet-stream",
+            )
+
+            await self._make_authenticated_request("POST", "/groceries", data=data)
+
+            logger.info(
+                f"Successfully cleared {len(groceries_to_delete)} items from grocery list"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to clear grocery list: {str(e)}")
+            raise PaprikaAPIError(f"Failed to clear grocery list: {str(e)}")
 
     async def close(self):
         """Close the HTTP session."""

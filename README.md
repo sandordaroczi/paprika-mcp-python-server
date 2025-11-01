@@ -1,12 +1,13 @@
 # Paprika MCP Python Server
 
-A Model Context Protocol (MCP) server that integrates Paprika Recipe Manager with Claude Desktop, enabling natural language recipe management through AI conversation.
+A Model Context Protocol (MCP) server that integrates Paprika Recipe Manager with Claude Desktop and Cursor, enabling natural language recipe and grocery list management through AI conversation.
 
 ## Features
 
-- **Recipe Creation**: Create new recipes with natural language descriptions
-- **Recipe Updates**: Full and partial recipe updates while preserving existing data
-- **Recipe Listing**: Browse all recipes with complete ingredient lists and details
+- **Recipe Management**: Create, update, and list recipes with natural language descriptions
+- **Grocery List Management**: Manage grocery lists with support for quantities with units (e.g., "4 kilos", "3 liters")
+- **Smart Quantity Handling**: Add, subtract, and track grocery items with unit-aware quantity management
+- **Multiple Lists**: Support for multiple grocery lists with default list fallback
 
 ## Demo
 
@@ -15,6 +16,9 @@ A Model Context Protocol (MCP) server that integrates Paprika Recipe Manager wit
 
 ### Recipe Recommendations  
 ![Getting recipe recommendations](images/demo-list-recipes.png)
+
+### Adding to grocery list (Cursor)
+![Adding to grocery list](images/demo-add-to-grocerylist-cursor.png)
 
 ## Prerequisites
 
@@ -131,7 +135,24 @@ Update the Spaghetti Carbonara recipe to serve 6 people instead of 4, and add "U
 For the recipe with UID [recipe-uid], just change the prep time to 15 minutes and add salt to the ingredients list.
 ```
 
+### Grocery List Management
+```
+What grocery lists do I have?
+
+What's on my grocery list?
+
+Add 3 kilos of bananas to my grocery list.
+
+How many bananas are on my grocery list?
+
+Add 1 kilo of flour to my "baking supplies" grocery list.
+
+Subtract 2 kilos of sugar from my grocery list.
+```
+
 ## Available Tools
+
+### Recipes
 
 | Tool | Description |
 |------|-------------|
@@ -139,6 +160,22 @@ For the recipe with UID [recipe-uid], just change the prep time to 15 minutes an
 | `update_recipe` | Complete recipe update (all fields) |
 | `update_recipe_partial` | Update only specified fields |
 | `list_recipes` | List all recipes with ingredients and details |
+
+### Groceries
+
+| Tool | Description |
+|------|-------------|
+| `get_grocery_lists` | Get all grocery list names from your Paprika account |
+| `get_groceries` | Get all groceries from a grocery list (defaults to default list) |
+| `get_grocery` | Get a specific grocery item by name with its quantity |
+| `add_grocery` | Add or update a grocery item. Supports quantities with units (e.g., "3 kilos", "4 liters") and negative values for subtraction |
+| `clear_grocery_list` | Clear all items from a grocery list |
+
+**Note on Quantities**: The `add_grocery` tool supports:
+- Simple numbers: `1`, `3`, `-2`
+- Quantities with units: `"3 kilos"`, `"4 liters"`, `"-2 kilos"`
+- Automatic unit preservation when adding to existing items
+- Error handling if subtraction would result in negative quantity
 
 ### Components
 
@@ -204,6 +241,20 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - The MCP community for documentation and examples
 
 ## Changelog
+
+### v1.1.0 (2025-11-01)
+- **Grocery List Management**: Complete grocery list functionality
+  - List all grocery lists
+  - Get groceries from any list
+  - Query specific grocery items
+  - Add/update groceries with quantity support
+  - Clear grocery lists
+- **Smart Quantity Handling**: 
+  - Support for quantities with units ("4 kilos", "3 liters")
+  - Automatic unit preservation when adding quantities
+  - Negative quantity support for subtraction
+  - Proper error handling for invalid operations
+- **Enhanced Error Messages**: Invalid grocery list names now show available valid lists
 
 ### v1.0.0 (2025-09-27)
 - Initial release

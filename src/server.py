@@ -207,6 +207,81 @@ async def main():
                         },
                     },
                 ),
+                Tool(
+                    name="get_grocery_lists",
+                    description="Get all grocery list names from Paprika",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                ),
+                Tool(
+                    name="get_groceries",
+                    description="Get all groceries from a grocery list",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "grocery_list_name": {
+                                "type": "string",
+                                "description": "Name of the grocery list (optional, defaults to default list)",
+                            }
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_grocery",
+                    description="Get a specific grocery item by name from a grocery list",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "item_name": {
+                                "type": "string",
+                                "description": "Name of the grocery item",
+                            },
+                            "grocery_list_name": {
+                                "type": "string",
+                                "description": "Name of the grocery list (optional, defaults to default list)",
+                            },
+                        },
+                        "required": ["item_name"],
+                    },
+                ),
+                Tool(
+                    name="add_grocery",
+                    description="Add a grocery item to a grocery list (adds to existing quantity if item already exists). Quantity can be an integer or string like '1 kilo', '4 liters', or '-2 kilos' to subtract.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "item_name": {
+                                "type": "string",
+                                "description": "Name of the grocery item to add",
+                            },
+                            "quantity": {
+                                "type": "string",
+                                "description": "Quantity to add (default: '1'). Can be a number or string with unit like '1 kilo', '4 liters'. Use negative values like '-2 kilos' to subtract.",
+                                "default": "1",
+                            },
+                            "grocery_list_name": {
+                                "type": "string",
+                                "description": "Name of the grocery list (optional, defaults to default list)",
+                            },
+                        },
+                        "required": ["item_name"],
+                    },
+                ),
+                Tool(
+                    name="clear_grocery_list",
+                    description="Clear all items from a grocery list",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "grocery_list_name": {
+                                "type": "string",
+                                "description": "Name of the grocery list (optional, defaults to default list)",
+                            }
+                        },
+                    },
+                ),
             ]
 
         @server.call_tool()
@@ -308,13 +383,109 @@ async def main():
 
                     return [TextContent(type="text", text=recipe_text)]
 
+                elif name == "get_grocery_lists":
+                    lists = await paprika_client.get_grocery_lists()
+                    if not lists:
+                        return [
+                            TextContent(
+                                type="text",
+                                text="No grocery lists found in your Paprika account.",
+                            )
+                        ]
+                    list_text = "Grocery lists:\n"
+                    for grocery_list in lists:
+                        list_name = grocery_list.get("name", "")
+                        is_default = grocery_list.get("is_default", False)
+                        default_marker = " (default)" if is_default else ""
+                        list_text += f"- {list_name}{default_marker}\n"
+                    return [TextContent(type="text", text=list_text)]
+
+                elif name == "get_groceries":
+                    grocery_list_name = arguments.get("grocery_list_name")
+                    groceries = await paprika_client.get_groceries(grocery_list_name)
+                    if not groceries:
+                        list_name = grocery_list_name or "default"
+                        return [
+                            TextContent(
+                                type="text",
+                                text=f"No groceries found in '{list_name}' list.",
+                            )
+                        ]
+                    grocery_text = (
+                        f"Groceries on {grocery_list_name or 'default'} list:\n"
+                    )
+                    for grocery in groceries:
+                        quantity = grocery.get("quantity", "")
+                        name = grocery.get("name", "")
+                        grocery_text += f"- {quantity}, {name}\n"
+                    return [TextContent(type="text", text=grocery_text)]
+
+                elif name == "get_grocery":
+                    item_name = arguments["item_name"]
+                    grocery_list_name = arguments.get("grocery_list_name")
+                    grocery = await paprika_client.get_grocery(
+                        item_name, grocery_list_name
+                    )
+                    if not grocery:
+                        list_name = grocery_list_name or "default"
+                        return [
+                            TextContent(
+                                type="text",
+                                text=f"Grocery item '{item_name}' not found in '{list_name}' list.",
+                            )
+                        ]
+                    # Format response with name and quantity (from full grocery object)
+                    quantity = grocery.get("quantity", "")
+                    name = grocery.get("name", "")
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Grocery item: {name}\nQuantity: {quantity}",
+                        )
+                    ]
+
+                elif name == "add_grocery":
+                    item_name = arguments["item_name"]
+                    quantity = arguments.get("quantity", "1")
+                    # Convert to string if it's an integer for consistency
+                    if isinstance(quantity, int):
+                        quantity = str(quantity)
+                    grocery_list_name = arguments.get("grocery_list_name")
+                    result = await paprika_client.add_grocery(
+                        item_name, quantity, grocery_list_name
+                    )
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Added {quantity} '{item_name}' to grocery list. Total quantity: {result['quantity']}",
+                        )
+                    ]
+
+                elif name == "clear_grocery_list":
+                    grocery_list_name = arguments.get("grocery_list_name")
+                    await paprika_client.clear_grocery_list(grocery_list_name)
+                    list_name = grocery_list_name or "default"
+                    return [
+                        TextContent(
+                            type="text",
+                            text=f"Successfully cleared '{list_name}' grocery list.",
+                        )
+                    ]
+
                 else:
                     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
             except Exception as e:
                 logger.error(f"Error in tool {name}: {str(e)}")
+                # Return human-readable error message
+                error_message = str(e)
+                if "PaprikaAPIError" in str(type(e)):
+                    # Extract the actual error message from PaprikaAPIError
+                    error_message = error_message
                 return [
-                    TextContent(type="text", text=f"Error executing {name}: {str(e)}")
+                    TextContent(
+                        type="text", text=f"Error executing {name}: {error_message}"
+                    )
                 ]
 
         # Run the server
