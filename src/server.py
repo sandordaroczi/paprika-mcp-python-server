@@ -8,7 +8,11 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from config import get_config
-from paprika_client import PaprikaClient
+from paprika_client import (
+    MealMatchAmbiguousError,
+    MealNotFoundError,
+    PaprikaClient,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -207,6 +211,77 @@ async def main():
                         },
                     },
                 ),
+                Tool(
+                    name="add_meal_to_plan",
+                    description="Add a meal to the meal plan",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "meal": {
+                                "type": "string",
+                                "description": "Meal name for fuzzy matching (optional if meal_id provided)",
+                            },
+                            "meal_id": {
+                                "type": "string",
+                                "description": "Recipe UUID (optional if meal provided)",
+                            },
+                            "date": {
+                                "type": "string",
+                                "description": 'Date in flexible format - accepts "YYYY-MM-DD", "dd mmm", "dd mmmm", etc. (preferred: "YYYY-MM-DD"). Optional, defaults to next day that doesn\'t have a meal of that type yet',
+                            },
+                            "type": {
+                                "type": "string",
+                                "description": "Meal type (default: dinner)",
+                                "default": "dinner",
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="remove_meal_from_plan",
+                    description="Remove a meal from the meal plan. If no arguments provided, removes meal on latest date in mealplan",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "meal": {
+                                "type": "string",
+                                "description": "Meal name (optional)",
+                            },
+                            "meal_id": {
+                                "type": "string",
+                                "description": "Recipe UUID (optional)",
+                            },
+                            "date": {
+                                "type": "string",
+                                "description": 'Date in flexible format - accepts "YYYY-MM-DD", "dd mmm", "dd mmmm", etc. (preferred: "YYYY-MM-DD"). Optional, defaults to last day with matching meal',
+                            },
+                            "type": {
+                                "type": "string",
+                                "description": "Meal type for filtering (default: dinner)",
+                                "default": "dinner",
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="list_meal_plan",
+                    description="List meal plan entries",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "num_days": {
+                                "type": "integer",
+                                "description": "Number of days to show (default: 10)",
+                                "default": 10,
+                            },
+                            "meal_type": {
+                                "type": "string",
+                                "description": "Filter by meal type (default: dinner)",
+                                "default": "dinner",
+                            },
+                        },
+                    },
+                ),
             ]
 
         @server.call_tool()
@@ -298,6 +373,8 @@ async def main():
                             if recipe.get("cook_time"):
                                 times.append(f"Cook: {recipe['cook_time']}")
                             recipe_text += f"  Time: {', '.join(times)}\n"
+                        if recipe.get("last_planned"):
+                            recipe_text += f"  Last planned: {recipe['last_planned']}\n"
                         if recipe.get("ingredients"):
                             ingredients_lines = recipe["ingredients"].split("\n")
                             ingredients_preview = "\n    ".join(ingredients_lines)
@@ -308,13 +385,100 @@ async def main():
 
                     return [TextContent(type="text", text=recipe_text)]
 
+                elif name == "add_meal_to_plan":
+                    meal = arguments.get("meal")
+                    meal_id = arguments.get("meal_id")
+                    date = arguments.get("date")
+                    meal_type = arguments.get("type", "dinner")
+
+                    result = await paprika_client.add_meal_to_plan(
+                        meal=meal, meal_id=meal_id, date=date, meal_type=meal_type
+                    )
+
+                    # Get meal plan to count meals by type
+                    all_meals = await paprika_client.get_meal_plan(num_days=365, meal_type=None)
+                    lunch_count = sum(1 for m in all_meals if m.get("type", "").lower() == "lunch")
+                    dinner_count = sum(1 for m in all_meals if m.get("type", "").lower() == "dinner")
+
+                    # Format readable date
+                    formatted_date = paprika_client._format_date_readable(result["date"])
+
+                    response_text = (
+                        f"Meal '{result['meal']}' added to the meal plan on {formatted_date}. "
+                        f"Now {lunch_count} lunches and {dinner_count} dinners are planned."
+                    )
+
+                    return [TextContent(type="text", text=response_text)]
+
+                elif name == "remove_meal_from_plan":
+                    meal = arguments.get("meal")
+                    meal_id = arguments.get("meal_id")
+                    date = arguments.get("date")
+                    meal_type = arguments.get("type", "dinner")
+
+                    result = await paprika_client.remove_meal_from_plan(
+                        meal=meal, meal_id=meal_id, date=date, meal_type=meal_type
+                    )
+
+                    # Format readable date
+                    formatted_date = paprika_client._format_date_readable(result["date"])
+
+                    response_text = (
+                        f"Meal '{result['meal']}' removed from meal plan on {formatted_date}"
+                    )
+
+                    return [TextContent(type="text", text=response_text)]
+
+                elif name == "list_meal_plan":
+                    num_days = arguments.get("num_days", 10)
+                    meal_type = arguments.get("meal_type", "dinner")
+
+                    meals = await paprika_client.get_meal_plan(
+                        num_days=num_days, meal_type=meal_type
+                    )
+
+                    if not meals:
+                        return [
+                            TextContent(
+                                type="text",
+                                text="No meals found in your meal plan for the specified criteria.",
+                            )
+                        ]
+
+                    # Format meal plan list
+                    meal_text = f"Found {len(meals)} meal(s) in your meal plan:\n\n"
+                    for meal_entry in meals:
+                        formatted_date = paprika_client._format_date_readable(meal_entry["date"])
+                        meal_text += f"• **{meal_entry['meal']}**\n"
+                        meal_text += f"  Date: {formatted_date}\n"
+                        meal_text += f"  Type: {meal_entry['type']}\n"
+                        meal_text += f"  Recipe ID: {meal_entry['meal_ID']}\n\n"
+
+                    return [TextContent(type="text", text=meal_text)]
+
                 else:
                     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
+            except MealMatchAmbiguousError as e:
+                # Format ambiguous match error with suggestions
+                match_names = [m.get("name", "Unknown") for m in e.matches]
+                suggestions = ", ".join(match_names)
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Did you mean these? {suggestions}",
+                    )
+                ]
+
+            except MealNotFoundError as e:
+                return [TextContent(type="text", text=str(e))]
+
             except Exception as e:
                 logger.error(f"Error in tool {name}: {str(e)}")
+                # Per non-functional requirements: show API errors literally
+                error_msg = str(e)
                 return [
-                    TextContent(type="text", text=f"Error executing {name}: {str(e)}")
+                    TextContent(type="text", text=f"Error executing {name}: {error_msg}")
                 ]
 
         # Run the server
